@@ -46,7 +46,10 @@ WORKDIR /app
 
 # Copy application code
 COPY src/ ./src/
-COPY models/ ./models/
+COPY models/*.tflite ./models/
+COPY models/*.pkl ./models/
+COPY models/*.json ./models/
+COPY models/*.png ./models/
 COPY requirements.txt ./
 
 # Create necessary directories and set permissions

@@ -56,3 +56,9 @@ docker-compose*.yml
 # Temporary files
 tmp/
 temp/
+
+# H5 model files (only using TFLite)
+*.h5
+
+# data files
+data/
