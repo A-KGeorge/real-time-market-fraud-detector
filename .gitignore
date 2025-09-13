@@ -1,2 +1,4 @@
 python/data
 python/.venv
+*.pyc
+__pycache__/

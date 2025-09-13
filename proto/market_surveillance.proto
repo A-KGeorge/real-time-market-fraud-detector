@@ -1,0 +1,120 @@
+syntax = "proto3";
+
+package market_surveillance;
+
+// Market surveillance gRPC service
+service MarketSurveillanceService {
+  // Single fraud detection
+  rpc DetectFraud(FraudDetectionRequest) returns (FraudDetectionResult);
+  
+  // Batch fraud detection
+  rpc DetectFraudBatch(
+    BatchFraudDetectionRequest
+  ) returns (
+    BatchFraudDetectionResponse
+  );
+
+  // Stream fraud detection (server streaming)
+  rpc StreamFraudDetection(
+    StreamFraudDetectionRequest
+  ) returns (
+    stream FraudDetectionResult
+  );
+  
+  // Health check
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+  
+  // Get model metrics
+  rpc GetModelMetrics(ModelMetricsRequest) returns (ModelMetricsResponse);
+}
+
+// Single fraud detection request
+message FraudDetectionRequest {
+  string symbol = 1;
+  // Unix timestamp, if not provided uses current time
+  optional int64 timestamp = 2;
+}
+
+// Fraud detection result
+message FraudDetectionResult {
+  string symbol = 1;
+  int64 timestamp = 2;
+  double ensemble_score = 3;
+  double classifier_probability = 4;
+  int32 anomaly_score = 5;
+  bool is_suspicious = 6;
+  string risk_level = 7;  // LOW, MEDIUM, HIGH
+  MarketData market_data = 8;
+  repeated string alerts = 9;  // List of specific alerts/reasons
+}
+
+// Batch fraud detection request
+message BatchFraudDetectionRequest {
+  repeated string symbols = 1;
+  optional int64 timestamp = 2;
+}
+
+// Batch fraud detection response
+message BatchFraudDetectionResponse {
+  repeated FraudDetectionResult results = 1;
+  int32 processed_count = 2;
+  int32 failed_count = 3;
+  repeated string errors = 4;
+}
+
+// Stream fraud detection request
+message StreamFraudDetectionRequest {
+  repeated string symbols = 1;
+  int32 interval_seconds = 2;  // Streaming interval (default: 60 seconds)
+}
+
+// Health check request/response
+message HealthCheckRequest {
+}
+
+message HealthCheckResponse {
+  string status = 1;  // SERVING, NOT_SERVING
+  int64 timestamp = 2;
+  string version = 3;
+  ModelStatus model_status = 4;
+}
+
+// Model metrics request/response
+message ModelMetricsRequest {
+}
+
+message ModelMetricsResponse {
+  ModelStatus status = 1;
+  ModelPerformance performance = 2;
+  int64 last_updated = 3;
+}
+
+// Supporting messages
+message MarketData {
+  double open = 1;
+  double high = 2;
+  double low = 3;
+  double close = 4;
+  int64 volume = 5;
+  double price_change = 6;
+  double volume_ratio = 7;
+  double rsi = 8;
+  double macd = 9;
+  double bb_position = 10;
+}
+
+message ModelStatus {
+  bool autoencoder_loaded = 1;
+  bool classifier_loaded = 2;
+  bool scaler_loaded = 3;
+  bool config_loaded = 4;
+  string last_error = 5;
+}
+
+message ModelPerformance {
+  double accuracy = 1;
+  double precision = 2;
+  double recall = 3;
+  double f1_score = 4;
+  double auc_score = 5;
+}
