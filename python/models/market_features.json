@@ -1,0 +1,22 @@
+[
+  "Price_Change",
+  "Price_Range",
+  "Gap",
+  "Volume_Change",
+  "Volume_Price_Ratio",
+  "Volume_Ratio",
+  "RSI",
+  "MACD",
+  "MACD_Signal",
+  "MACD_Histogram",
+  "BB_Width",
+  "BB_Position",
+  "Price_vs_SMA10",
+  "Price_vs_SMA20",
+  "Volatility_10d",
+  "Volatility_20d",
+  "Hour",
+  "DayOfWeek",
+  "IsMonday",
+  "IsFriday"
+]
