@@ -206,7 +206,7 @@ Currently, only the ML model training component is available. Additional compone
 
    ```bash
    python -m venv venv
-   source ./.venv/bin/activate  # On WSL2/Linux
+   source venv/bin/activate  # On WSL2/Linux
    ```
 
 3. **Install dependencies:**
