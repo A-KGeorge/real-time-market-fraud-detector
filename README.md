@@ -220,8 +220,8 @@ If you need to retrain the ML models, download the required dataset:
 
 1. **Download the Stock Market Dataset from Kaggle:**
 
-   - Visit [Stock Market Dataset by Oleh Onyshchak](https://www.kaggle.com/datasets/jacksoncrow/stock-market-dataset)
-   - Download and unzip the dataset
+- Visit [Stock Market Dataset by Oleh Onyshchak](https://www.kaggle.com/datasets/jacksoncrow/stock-market-dataset){:target="\_blank"}
+  - Download and unzip the dataset
 
 2. **Place the dataset in the correct location:**
 
