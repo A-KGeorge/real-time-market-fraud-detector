@@ -206,10 +206,28 @@ Currently, only the ML model training component is available. Additional compone
 
    ```bash
    python -m venv venv
-   source venv/bin/activate  # On WSL2/Linux
+   source ./.venv/bin/activate  # On WSL2/Linux
    ```
 
 3. **Install dependencies:**
    ```bash
    pip install -r requirements.txt
    ```
+
+#### Dataset Setup (Required for Model Retraining)
+
+If you need to retrain the ML models, download the required dataset:
+
+1. **Download the Stock Market Dataset from Kaggle:**
+
+   - Visit [Stock Market Dataset by Oleh Onyshchak](https://www.kaggle.com/datasets/jacksoncrow/stock-market-dataset)
+   - Download and unzip the dataset
+
+2. **Place the dataset in the correct location:**
+
+   ```bash
+   # Ensure the unzipped dataset files are placed in:
+   python/data/
+   ```
+
+   The `python/data/` folder should contain the market data files needed for training.
