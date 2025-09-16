@@ -19,7 +19,7 @@ RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
 # Copy requirements and install Python dependencies
-COPY requirements.txt .
+COPY requirements-inference.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Production stage
@@ -44,14 +44,23 @@ COPY --from=builder /opt/venv /opt/venv
 # Set working directory
 WORKDIR /app
 
-# Copy application code
-COPY src/ ./src/
+# Copy only necessary application code (exclude training)
+COPY src/inference/ ./src/inference/
+COPY src/shared/ ./src/shared/
+COPY src/main.py ./src/
+COPY src/lambda_inference.py ./src/
 COPY entrypoint.sh ./
+COPY requirements.txt ./
+
+# Copy only TensorFlow Lite models and associated files
 COPY models/*.tflite ./models/
 COPY models/*.pkl ./models/
 COPY models/*.json ./models/
-COPY models/*.png ./models/
-COPY requirements.txt ./
+# Note: Exclude any large training datasets or full TensorFlow models
+
+# Copy proto generated files (ensure directory exists first)
+RUN mkdir -p ./src/generated/
+COPY src/generated/ ./src/generated/
 
 # Create necessary directories and set permissions
 RUN mkdir -p /app/logs \
@@ -68,9 +77,6 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
 # Expose gRPC port and health check port
 EXPOSE 50051 8080
 
-# Expose health check port (optional)
-EXPOSE 8080
-
 # Set default environment variables for container
 ENV USE_SQS_DATA_SOURCE=true \
     FALLBACK_TO_YFINANCE=true \
@@ -79,5 +85,5 @@ ENV USE_SQS_DATA_SOURCE=true \
     GRPC_PORT=50051 \
     LOG_LEVEL=INFO
 
-# Start the service (mode determined by environment variables)
+# Start the service
 CMD ["./entrypoint.sh"]
