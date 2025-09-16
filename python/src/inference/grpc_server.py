@@ -31,12 +31,14 @@ try:
     from .model_loader import ModelLoader
     from .data_fetcher import DataFetcher
     from .feature_engineer import FeatureEngineer
+    from .sns_webhook import SNSWebhookHandler
 except ImportError:
     # Fallback for when running as script
     from inference.config import Config
     from inference.model_loader import ModelLoader
     from inference.data_fetcher import DataFetcher
     from inference.feature_engineer import FeatureEngineer
+    from inference.sns_webhook import SNSWebhookHandler
 
 # Configure logging
 logging.basicConfig(
@@ -450,6 +452,35 @@ def start_health_check_server():
     except Exception as e:
         logger.error(f"Failed to start health check server: {e}")
 
+def start_sqs_polling(surveillance_service):
+    """Start adaptive SQS polling in background thread"""
+    logger.info("Starting background SQS polling thread...")
+    
+    while True:
+        try:
+            if surveillance_service.data_fetcher.use_sqs and surveillance_service.data_fetcher.sqs_consumer:
+                # Poll for messages
+                messages = surveillance_service.data_fetcher.sqs_consumer.poll_messages()
+                if messages:
+                    logger.info(f"Background poll: Received {len(messages)} SQS messages")
+                    for message in messages:
+                        symbol = message.get('symbol', 'UNKNOWN')
+                        price = message.get('price', 'N/A')
+                        logger.info(f"  - {symbol}: ${price}")
+                else:
+                    logger.debug("Background poll: No new SQS messages")
+                
+                # Use adaptive polling interval for cost optimization
+                interval = surveillance_service.data_fetcher.sqs_consumer.get_adaptive_interval()
+                time.sleep(interval)
+            else:
+                # Fallback to default interval
+                time.sleep(Config.SQS_POLLING_INTERVAL)
+            
+        except Exception as e:
+            logger.error(f"SQS polling error: {e}")
+            time.sleep(Config.SQS_POLLING_INTERVAL)
+
 def serve():
     """Start the gRPC server and health check server"""
     global service_start_time
@@ -467,6 +498,26 @@ def serve():
     # Add service
     surveillance_service = MarketSurveillanceService()
     pb2_grpc.add_MarketSurveillanceServiceServicer_to_server(surveillance_service, server)
+    
+    # Choose data source: SNS webhook or SQS polling
+    if Config.USE_SNS_WEBHOOK:
+        # Use SNS webhook for push-based notifications (cost-effective)
+        webhook_handler = SNSWebhookHandler(
+            surveillance_service.model_loader, 
+            surveillance_service.feature_engineer
+        )
+        webhook_thread = webhook_handler.start_server(Config.WEBHOOK_HOST, Config.WEBHOOK_PORT)
+        logger.info(f"SNS webhook server started on {Config.WEBHOOK_HOST}:{Config.WEBHOOK_PORT}")
+        logger.info("Using push-based SNS notifications (cost optimized)")
+        
+    elif Config.USE_SQS_DATA_SOURCE:
+        # Use traditional SQS polling (legacy approach)
+        sqs_thread = threading.Thread(target=start_sqs_polling, args=(surveillance_service,), daemon=True)
+        sqs_thread.start()
+        logger.info("Background SQS polling thread started")
+        logger.info("Using SQS polling (higher cost)")
+    else:
+        logger.info("No data source enabled, using yfinance fallback only")
     
     # Configure server
     listen_addr = f"{Config.GRPC_HOST}:{Config.GRPC_PORT}"

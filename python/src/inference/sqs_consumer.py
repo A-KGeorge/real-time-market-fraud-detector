@@ -23,6 +23,8 @@ class SQSConsumer:
         self.queue_url = None
         self.message_cache = {}
         self.last_poll_time = None
+        self.consecutive_empty_polls = 0  # Track empty polls for adaptive polling
+        self.adaptive_interval = self.config.SQS_POLLING_INTERVAL
         self._initialize_client()
         
     def _initialize_client(self):
@@ -72,8 +74,11 @@ class SQSConsumer:
             
             if not messages:
                 logger.debug("No messages received from SQS")
+                self._handle_empty_poll()
                 return []
             
+            # Reset adaptive polling on successful message receipt
+            self._reset_adaptive_polling()
             logger.info(f"Received {len(messages)} messages from SQS")
             
             # Parse and validate messages
@@ -192,6 +197,20 @@ class SQSConsumer:
             # Parse message body
             body = json.loads(message['Body'])
             
+            # ========== DEBUG LOGGING - COMMENT OUT IN PRODUCTION ==========
+            # Log the complete raw message for debugging purposes
+            logger.info("="*60)
+            logger.info("SQS RAW MESSAGE RECEIVED (DEBUG - REMOVE IN PRODUCTION)")
+            logger.info("="*60)
+            logger.info(f"Message ID: {message.get('MessageId', 'Unknown')}")
+            logger.info(f"Receipt Handle: {message.get('ReceiptHandle', 'Unknown')}")
+            logger.info(f"Message Attributes: {message.get('MessageAttributes', {})}")
+            logger.info(f"Raw Body: {message.get('Body', 'No body')}")
+            logger.info("-" * 30)
+            logger.info(f"Parsed Body: {json.dumps(body, indent=2, default=str)}")
+            logger.info("="*60)
+            # ========== END DEBUG LOGGING ==========
+            
             # Validate message structure
             if not self._validate_message_format(body):
                 logger.warning("Invalid message format received")
@@ -212,17 +231,39 @@ class SQSConsumer:
     
     def _validate_message_format(self, message: Dict[str, Any]) -> bool:
         """Validate that message has required fields"""
-        required_fields = ['messageType', 'symbol', 'data', 'timestamp']
+        # Support both camelCase (old) and snake_case (Rust) field names
+        required_fields = ['symbol', 'data']
+        
+        # Check for message type field (either messageType or message_type)
+        has_message_type = 'messageType' in message or 'message_type' in message
+        if not has_message_type:
+            logger.warning("Message missing messageType/message_type field")
+            return False
+        
+        # Check for timestamp field (multiple possible locations)
+        has_timestamp = (
+            'timestamp' in message or 
+            'ingestion_timestamp' in message or
+            ('data' in message and 'timestamp' in message['data'])
+        )
+        if not has_timestamp:
+            logger.warning("Message missing timestamp field (checked: timestamp, ingestion_timestamp, data.timestamp)")
+            return False
         
         for field in required_fields:
             if field not in message:
                 logger.warning(f"Message missing required field: {field}")
                 return False
         
-        # Validate data structure
+        # Validate data structure - support both formats
         data = message.get('data', {})
-        required_data_fields = ['open', 'high', 'low', 'close', 'volume']
         
+        # Rust format uses MarketData structure
+        if 'open' in data and 'high' in data and 'low' in data and 'close' in data and 'volume' in data:
+            return True
+            
+        # Legacy format validation  
+        required_data_fields = ['open', 'high', 'low', 'close', 'volume']
         for field in required_data_fields:
             if field not in data:
                 logger.warning(f"Message data missing required field: {field}")
@@ -235,27 +276,58 @@ class SQSConsumer:
         try:
             data = message.get('data', {})
             symbol = message.get('symbol', '')
-            timestamp = message.get('timestamp', '')
             
-            # Create Series with market data
-            series_data = {
-                'Open': float(data['open']),
-                'High': float(data['high']),
-                'Low': float(data['low']),
-                'Close': float(data['close']),
-                'Volume': int(data['volume']),
-                'Symbol': symbol,
-                'Date': pd.to_datetime(timestamp)
-            }
+            # Get timestamp from multiple possible locations
+            timestamp = (
+                message.get('timestamp') or 
+                message.get('ingestion_timestamp') or 
+                data.get('timestamp', '')
+            )
             
-            # Add additional fields if present
-            if 'adjClose' in data:
-                series_data['Adj Close'] = float(data['adjClose'])
-            
+            # Handle Rust MarketData format (nested data structure)
+            if isinstance(data, dict) and 'symbol' in data:
+                # Rust MarketData format
+                series_data = {
+                    'Open': float(data['open']),
+                    'High': float(data['high']),
+                    'Low': float(data['low']),
+                    'Close': float(data['close']),
+                    'Volume': int(data['volume']),
+                    'Symbol': data.get('symbol', symbol),
+                    'Date': pd.to_datetime(data.get('timestamp', timestamp))
+                }
+                
+                # Add additional fields if present
+                if 'adj_close' in data and data['adj_close'] is not None:
+                    series_data['Adj Close'] = float(data['adj_close'])
+                elif 'previous_close' in data:
+                    series_data['Previous Close'] = float(data['previous_close'])
+                    
+                logger.info(f"✅ Converted Rust MarketData for {symbol}: Close=${series_data['Close']}, Volume={series_data['Volume']}")
+                
+            else:
+                # Legacy format - direct data fields
+                series_data = {
+                    'Open': float(data['open']),
+                    'High': float(data['high']),
+                    'Low': float(data['low']),
+                    'Close': float(data['close']),
+                    'Volume': int(data['volume']),
+                    'Symbol': symbol,
+                    'Date': pd.to_datetime(timestamp)
+                }
+                
+                # Add additional fields if present
+                if 'adjClose' in data:
+                    series_data['Adj Close'] = float(data['adjClose'])
+                    
+                logger.info(f"✅ Converted legacy data for {symbol}: Close=${series_data['Close']}, Volume={series_data['Volume']}")
+
             return pd.Series(series_data)
             
         except Exception as e:
-            logger.error(f"Failed to convert message to Series: {str(e)}")
+            logger.error(f"❌ Failed to convert message to Series: {str(e)}")
+            logger.error(f"Message data: {json.dumps(message, indent=2, default=str)}")
             return None
     
     def _delete_message(self, receipt_handle: str):
@@ -275,8 +347,35 @@ class SQSConsumer:
             'cache_size': len(self.message_cache),
             'last_poll_time': self.last_poll_time.isoformat() if self.last_poll_time else None,
             'queue_url': self.queue_url,
-            'is_connected': self.sqs_client is not None
+            'is_connected': self.sqs_client is not None,
+            'consecutive_empty_polls': self.consecutive_empty_polls,
+            'adaptive_interval': self.adaptive_interval
         }
+    
+    def _handle_empty_poll(self):
+        """Handle empty poll result - increase polling interval to save costs"""
+        if not self.config.SQS_ADAPTIVE_POLLING:
+            return
+            
+        self.consecutive_empty_polls += 1
+        
+        # Gradually increase polling interval when no messages
+        if self.consecutive_empty_polls >= 3:
+            # Double the interval, but cap at 5 minutes
+            self.adaptive_interval = min(self.adaptive_interval * 2, 300)
+            logger.debug(f"💰 Adaptive polling: Increased interval to {self.adaptive_interval}s after {self.consecutive_empty_polls} empty polls")
+    
+    def _reset_adaptive_polling(self):
+        """Reset adaptive polling when messages are received"""
+        if self.consecutive_empty_polls > 0:
+            logger.debug(f"🔄 Adaptive polling: Reset to {self.config.SQS_POLLING_INTERVAL}s after receiving messages")
+            
+        self.consecutive_empty_polls = 0
+        self.adaptive_interval = self.config.SQS_POLLING_INTERVAL
+    
+    def get_adaptive_interval(self) -> int:
+        """Get current adaptive polling interval"""
+        return self.adaptive_interval if self.config.SQS_ADAPTIVE_POLLING else self.config.SQS_POLLING_INTERVAL
     
     def clear_cache(self):
         """Clear message cache"""

@@ -46,6 +46,7 @@ WORKDIR /app
 
 # Copy application code
 COPY src/ ./src/
+COPY entrypoint.sh ./
 COPY models/*.tflite ./models/
 COPY models/*.pkl ./models/
 COPY models/*.json ./models/
@@ -54,6 +55,7 @@ COPY requirements.txt ./
 
 # Create necessary directories and set permissions
 RUN mkdir -p /app/logs \
+    && chmod +x /app/entrypoint.sh \
     && chown -R appuser:appuser /app
 
 # Switch to non-root user
@@ -77,5 +79,5 @@ ENV USE_SQS_DATA_SOURCE=true \
     GRPC_PORT=50051 \
     LOG_LEVEL=INFO
 
-# Start the gRPC server
-CMD ["python", "-m", "src.inference.grpc_server"]
+# Start the service (mode determined by environment variables)
+CMD ["./entrypoint.sh"]

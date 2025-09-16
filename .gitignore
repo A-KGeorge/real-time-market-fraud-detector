@@ -2,3 +2,10 @@ python/data
 python/.venv
 *.pyc
 __pycache__/
+
+# Rust
+rust/target/
+rust/.env
+
+lambda/target/
+lambda/bootstrap

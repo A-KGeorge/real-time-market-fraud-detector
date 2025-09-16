@@ -11,7 +11,7 @@ class Config:
     GRPC_HOST = os.getenv('GRPC_HOST', '0.0.0.0')
     
     # Model paths
-    MODELS_DIR = os.getenv('MODELS_DIR', '/app/models')
+    MODELS_DIR = os.getenv('MODELS_DIR', os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'models'))
     AUTOENCODER_MODEL_PATH = os.path.join(MODELS_DIR, 'market_autoencoder.tflite')
     CLASSIFIER_MODEL_PATH = os.path.join(MODELS_DIR, 'market_classifier.tflite')
     SCALER_PATH = os.path.join(MODELS_DIR, 'market_scaler.pkl')
@@ -20,8 +20,9 @@ class Config:
     
     # Default symbols for testing
     DEFAULT_SYMBOLS: List[str] = [
-        'AAPL', 'GOOGL', 'MSFT', 'AMZN', 'TSLA', 
-        'NVDA', 'META', 'NFLX', 'AMD', 'INTC'
+        'AAPL', 'GOOGL', 'MSFT', 'AMZN', 'TSLA', 'NVDA', 'META', 'NFLX', 'AMD', 'INTC',
+        'BABA', 'JPM', 'JNJ', 'V', 'PG', 'UNH', 'HD', 'MA', 'PYPL', 'DIS',
+        'VZ', 'ADBE', 'CRM', 'CMCSA', 'PFE', 'KO', 'PEP', 'ABT', 'TMO'
     ]
     
     # Data fetching configuration
@@ -47,13 +48,17 @@ class Config:
     
     # SQS Consumer Configuration
     USE_SQS_DATA_SOURCE = os.getenv('USE_SQS_DATA_SOURCE', 'true').lower() == 'true'
+    USE_SNS_WEBHOOK = os.getenv('USE_SNS_WEBHOOK', 'false').lower() == 'true'  # Enable SNS webhook instead of polling
+    WEBHOOK_HOST = os.getenv('WEBHOOK_HOST', '0.0.0.0')
+    WEBHOOK_PORT = int(os.getenv('WEBHOOK_PORT', '8080'))
     AWS_REGION = os.getenv('AWS_REGION', 'us-east-1')
     SQS_QUEUE_NAME = os.getenv('SQS_QUEUE_NAME', 'market-surveillance-data.fifo')
     SQS_QUEUE_URL = os.getenv('SQS_QUEUE_URL')
-    SQS_POLLING_INTERVAL = int(os.getenv('SQS_POLLING_INTERVAL', '10'))  # seconds
+    SQS_POLLING_INTERVAL = int(os.getenv('SQS_POLLING_INTERVAL', '30'))  # seconds - increased for cost savings
     SQS_MAX_MESSAGES = int(os.getenv('SQS_MAX_MESSAGES', '10'))  # max messages per poll
-    SQS_WAIT_TIME = int(os.getenv('SQS_WAIT_TIME', '20'))  # long polling wait time
+    SQS_WAIT_TIME = int(os.getenv('SQS_WAIT_TIME', '20'))  # long polling wait time (optimal)
     SQS_VISIBILITY_TIMEOUT = int(os.getenv('SQS_VISIBILITY_TIMEOUT', '300'))  # 5 minutes
+    SQS_ADAPTIVE_POLLING = os.getenv('SQS_ADAPTIVE_POLLING', 'true').lower() == 'true'  # Adaptive polling for cost optimization
     
     # Fallback configuration (when SQS is not available)
     FALLBACK_TO_YFINANCE = os.getenv('FALLBACK_TO_YFINANCE', 'true').lower() == 'true'
