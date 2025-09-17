@@ -47,6 +47,7 @@ WORKDIR /app
 # Copy only necessary application code (exclude training)
 COPY src/inference/ ./src/inference/
 COPY src/shared/ ./src/shared/
+COPY src/generated/ ./src/generated/
 COPY src/main.py ./src/
 COPY src/lambda_inference.py ./src/
 COPY entrypoint.sh ./
