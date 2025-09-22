@@ -17,13 +17,14 @@ class FeatureEngineer:
     def __init__(self, feature_columns: List[str]):
         self.feature_columns = feature_columns
         
-    def engineer_features_for_inference(self, data: pd.DataFrame, symbol: str) -> Optional[Dict]:
+    def engineer_features_for_inference(self, data: pd.DataFrame, symbol: str, is_batch_mode: bool = False) -> Optional[Dict]:
         """
         Engineer features for a single symbol's data for real-time inference
         
         Args:
             data: DataFrame with OHLCV data
             symbol: Stock symbol
+            is_batch_mode: Whether this is part of batch processing (affects feature engineering mode)
             
         Returns:
             Dictionary with engineered features or None if failed
@@ -34,9 +35,19 @@ class FeatureEngineer:
                 return None
             
             # Handle single data point scenario (Lambda mode)
-            if len(data) == 1:
+            # Only use simplified features if NOT in batch mode and only 1 data point
+            if len(data) == 1 and not is_batch_mode:
                 logger.info(f"Single data point mode - using simplified feature engineering")
                 return self._engineer_single_point_features(data, symbol)
+            
+            # Batch mode or multiple data points - use full feature engineering
+            if is_batch_mode:
+                logger.info(f"🔄 BATCH MODE: Enhanced feature engineering for {symbol} with {len(data)} data points")
+                # Even with single data point, use enhanced calculations in batch mode
+                if len(data) == 1:
+                    return self._engineer_enhanced_single_point_features(data, symbol)
+            else:
+                logger.info(f"📊 MULTI-POINT MODE: Full feature engineering for {symbol} with {len(data)} data points")
             
             # Make a copy and sort by date
             df = data.copy().sort_values('Date').reset_index(drop=True)
@@ -270,6 +281,115 @@ class FeatureEngineer:
             alerts.append("Alert generation error - manual review recommended")
         
         return alerts
+    
+    def _engineer_enhanced_single_point_features(self, data: pd.DataFrame, symbol: str) -> Dict:
+        """
+        Enhanced feature engineering for single data point in batch mode
+        Uses more sophisticated calculations while still working with single point
+        """
+        try:
+            row = data.iloc[0]
+            
+            # Map column names from lambda data format to expected format
+            open_price = row.get('Open', row.get('open', 0))
+            high_price = row.get('High', row.get('high', 0)) 
+            low_price = row.get('Low', row.get('low', 0))
+            close_price = row.get('Close', row.get('close', 0))
+            volume = row.get('Volume', row.get('volume', 0))
+            previous_close = row.get('previous_close', close_price)
+            
+            logger.info(f"🚀 ENHANCED BATCH PROCESSING: {symbol} -> Close=${close_price:.2f}, Volume={volume:,}, PrevClose=${previous_close:.2f}")
+            
+            # Calculate enhanced features
+            features = {}
+            
+            # Initialize all expected features with default values
+            for col in self.feature_columns:
+                features[col] = 0.0
+            
+            # Calculate basic features that can be derived from single point
+            if previous_close > 0:
+                features['Price_Change'] = (close_price - previous_close) / previous_close
+                features['Gap'] = (open_price - previous_close) / previous_close
+            else:
+                features['Price_Change'] = 0.0
+                features['Gap'] = 0.0
+            
+            if close_price > 0:
+                features['Price_Range'] = (high_price - low_price) / close_price
+                features['Volume_Price_Ratio'] = volume / close_price
+            else:
+                features['Price_Range'] = 0.0
+                features['Volume_Price_Ratio'] = 0.0
+            
+            # Enhanced technical indicators (using more reasonable approximations)
+            price_change_abs = abs(features['Price_Change'])
+            
+            # More dynamic RSI based on price movement
+            if features['Price_Change'] > 0.02:  # Strong positive move
+                features['RSI'] = 70.0  # Overbought territory
+            elif features['Price_Change'] < -0.02:  # Strong negative move
+                features['RSI'] = 30.0  # Oversold territory
+            else:
+                features['RSI'] = 50.0 + (features['Price_Change'] * 1000)  # Scale to RSI range
+                features['RSI'] = max(0, min(100, features['RSI']))  # Clamp to valid range
+            
+            # MACD approximation based on current price movement
+            features['MACD'] = features['Price_Change'] * 10  # Scale price change
+            features['MACD_Signal'] = features['MACD'] * 0.8  # Signal line approximation
+            features['MACD_Histogram'] = features['MACD'] - features['MACD_Signal']
+            
+            # Enhanced Bollinger Bands position
+            if features['Price_Range'] > 0:
+                # Use price range to estimate volatility
+                volatility_estimate = features['Price_Range'] * 2
+                bb_middle = close_price
+                bb_upper = bb_middle * (1 + volatility_estimate)
+                bb_lower = bb_middle * (1 - volatility_estimate)
+                features['BB_Position'] = (close_price - bb_lower) / (bb_upper - bb_lower)
+                features['BB_Position'] = max(0, min(1, features['BB_Position']))  # Clamp 0-1
+                features['BB_Width'] = (bb_upper - bb_lower) / bb_middle
+            else:
+                features['BB_Position'] = 0.5  # Middle of bands
+                features['BB_Width'] = 0.04  # Default 4% width
+            
+            # Volume analysis enhancement
+            # Assume average volume for enhanced analysis (could be improved with historical data)
+            estimated_avg_volume = volume * 0.8  # Conservative estimate
+            features['Volume_Ratio'] = volume / estimated_avg_volume if estimated_avg_volume > 0 else 1.0
+            features['Volume_Change'] = 0.0  # Cannot calculate without previous volume
+            
+            # Market impact indicators
+            features['Market_Impact'] = (volume * abs(features['Price_Change'])) / 1000000  # Normalized impact
+            features['Liquidity_Risk'] = 1.0 / max(volume, 1000)  # Inverse of volume
+            
+            # Momentum indicators
+            intraday_return = (close_price - open_price) / open_price if open_price > 0 else 0
+            features['Intraday_Return'] = intraday_return
+            features['Momentum_Score'] = features['Price_Change'] + (intraday_return * 0.5)
+            
+            logger.info(f"✅ ENHANCED FEATURES: {symbol} | Price_Change={features['Price_Change']:.4f} | RSI={features['RSI']:.2f} | Volume_Ratio={features['Volume_Ratio']:.2f} | BB_Position={features['BB_Position']:.3f}")
+            
+            # Add market data for response
+            features['_market_data'] = {
+                'open': float(open_price),
+                'high': float(high_price),
+                'low': float(low_price),
+                'close': float(close_price),
+                'volume': int(volume),
+                'price_change': float(features['Price_Change']),
+                'volume_ratio': float(features['Volume_Ratio']),
+                'rsi': float(features['RSI']),
+                'macd': float(features['MACD']),
+                'bb_position': float(features['BB_Position'])
+            }
+            
+            return features
+            
+        except Exception as e:
+            logger.error(f"Enhanced single-point feature engineering failed for {symbol}: {str(e)}")
+            # Fallback to basic single-point features
+            return self._engineer_single_point_features(data, symbol)
     
     def _engineer_single_point_features(self, data: pd.DataFrame, symbol: str) -> Dict:
         """

@@ -92,6 +92,14 @@ def process_batch_market_data(batch_data_str: str) -> bool:
         
         logger.info(f"Grouped data into {len(symbol_data)} symbols: {list(symbol_data.keys())}")
         
+        # Log detailed data point information
+        total_data_points = sum(len(data_points) for data_points in symbol_data.values())
+        logger.info(f"=== BATCH DATA POINTS SUMMARY ===")
+        logger.info(f"Total data points across all symbols: {total_data_points}")
+        for symbol, data_points in symbol_data.items():
+            logger.info(f"  {symbol}: {len(data_points)} data points")
+        logger.info("==================================")
+        
         # Initialize ML components once
         logger.info("Initializing Market Surveillance Service...")
         model_loader = ModelLoader()
@@ -106,7 +114,15 @@ def process_batch_market_data(batch_data_str: str) -> bool:
         # Process each symbol with its accumulated data
         results = {}
         for symbol, data_points in symbol_data.items():
+            logger.info(f"=== PROCESSING SYMBOL: {symbol} ===")
             logger.info(f"Processing {len(data_points)} data points for symbol: {symbol}")
+            
+            # Log details of each data point
+            for i, dp in enumerate(data_points):
+                timestamp = dp.get('timestamp', 'unknown')
+                close_price = dp.get('close', 0)
+                volume = dp.get('volume', 0)
+                logger.info(f"  Data point {i+1}: timestamp={timestamp}, close={close_price}, volume={volume}")
             
             # Convert to DataFrame with proper column names and sorting
             import pandas as pd
@@ -126,22 +142,29 @@ def process_batch_market_data(batch_data_str: str) -> bool:
             
             logger.info(f"Created DataFrame with {len(market_df)} rows for {symbol}")
             logger.info(f"Date range: {market_df['Date'].min()} to {market_df['Date'].max()}")
+            logger.info(f"Price range: ${market_df['Close'].min():.2f} to ${market_df['Close'].max():.2f}")
             
             # Process fraud detection with multiple data points
             result = process_symbol_fraud_detection(
-                symbol, market_df, model_loader, feature_engineer
+                symbol, market_df, model_loader, feature_engineer, is_batch_mode=True
             )
             
             results[symbol] = result
         
         # Log overall results
         logger.info("=== BATCH PROCESSING RESULTS ===")
+        processed_symbols = 0
+        total_processed_points = 0
         for symbol, result in results.items():
+            data_points_count = len(symbol_data[symbol])
+            total_processed_points += data_points_count
+            processed_symbols += 1
             if result:
-                logger.info(f"{symbol}: Risk={result['risk_level']}, Score={result['ensemble_score']:.6f}")
+                logger.info(f"{symbol} ({data_points_count} points): Risk={result['risk_level']}, Score={result['ensemble_score']:.6f}")
             else:
-                logger.error(f"{symbol}: Processing failed")
+                logger.error(f"{symbol} ({data_points_count} points): Processing failed")
         
+        logger.info(f"SUMMARY: Processed {processed_symbols} symbols with {total_processed_points} total data points")
         logger.info(f"Successfully processed batch correlation_id: {correlation_id}")
         return True
         
@@ -212,7 +235,7 @@ def process_single_market_data(market_data_str: str) -> bool:
         
         logger.info(f"Created DataFrame with {len(market_df)} row(s)")
         
-        result = process_symbol_fraud_detection(symbol, market_df, model_loader, feature_engineer)
+        result = process_symbol_fraud_detection(symbol, market_df, model_loader, feature_engineer, is_batch_mode=False)
         
         if result:
             logger.info(f"Successfully processed correlation_id: {correlation_id}")
@@ -228,7 +251,7 @@ def process_single_market_data(market_data_str: str) -> bool:
         logger.error(f"Error during processing: {e}")
         return False
 
-def process_symbol_fraud_detection(symbol: str, market_df, model_loader, feature_engineer) -> dict:
+def process_symbol_fraud_detection(symbol: str, market_df, model_loader, feature_engineer, is_batch_mode: bool = False) -> dict:
     """
     Common fraud detection logic for both single and batch processing
     """
@@ -236,7 +259,7 @@ def process_symbol_fraud_detection(symbol: str, market_df, model_loader, feature
     
     try:
         # Engineer features for inference
-        features = feature_engineer.engineer_features_for_inference(market_df, symbol)
+        features = feature_engineer.engineer_features_for_inference(market_df, symbol, is_batch_mode=is_batch_mode)
         if features is None:
             logger.error(f"Feature engineering failed for {symbol}")
             return None
