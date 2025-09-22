@@ -24,7 +24,7 @@ end
 
 %% INGESTION
 subgraph Ingestion["High-Frequency Ingestion"]
-RUST[Rust Ingestion Service<br/>10 Symbols @ 2s intervals<br/>30 requests/minute<br/>Round-robin Processing]:::rust
+RUST[Rust Ingestion Service<br/>29 Symbols @ 2s intervals<br/>30 requests/minute<br/>Round-robin Processing]:::rust
 end
 
 %% QUEUE LAYER
@@ -103,7 +103,7 @@ AF -->|"WebSocket Events"| ANG
 
 - **Language**: Rust for maximum performance and memory safety
 - **Data Source**: Yahoo Finance API using `yahoo_finance_api` crate
-- **Symbols**: Processes 10 stock symbols (AAPL, GOOGL, MSFT, AMZN, TSLA, NVDA, META, NFLX, AMD, INTC)
+- **Symbols**: Processes 29 stock symbols including major tech (AAPL, GOOGL, MSFT, AMZN, TSLA, NVDA, META, NFLX, AMD, INTC), finance (BABA, JPM, V, MA, PYPL), healthcare (JNJ, UNH, PFE, ABT, TMO), consumer goods (PG, HD, DIS, VZ, KO, PEP), and enterprise (ADBE, CRM, CMCSA)
 - **Frequency**: 2-second intervals with round-robin symbol processing (30 requests per minute)
 - **Rate Limiting**: 1,800 requests per hour (90% of Yahoo Finance API limit)
 - **Features**:
@@ -212,7 +212,7 @@ The system implements high-frequency data collection with batch processing capab
 **Data Collection:**
 
 - Rust service processes 1 symbol every 2 seconds (round-robin)
-- 10 symbols total = full rotation every 20 seconds
+- 29 symbols total = full rotation every 58 seconds
 - 30 requests per minute = 1,800 requests per hour
 - Operates at 90% of Yahoo Finance API rate limit
 
@@ -222,6 +222,8 @@ The system implements high-frequency data collection with batch processing capab
 - Single ECS task processes entire batch
 - Enables multi-point feature engineering with technical indicators
 - Groups data by symbol for time-series analysis
+
+> **⚠️ SQS FIFO Batching Limitation**: AWS SQS FIFO queues have limited batching capabilities. Messages are only batched if they arrive within milliseconds of each other. With our 2-second ingestion intervals, Lambda typically receives 1 message per invocation, not true batches. However, the system uses enhanced single-point feature engineering in "batch mode" to provide superior fraud detection compared to basic single-point processing.
 
 **Feature Engineering:**
 
@@ -256,7 +258,7 @@ Rust → Python message format compatibility VERIFIED!
 
 - **Rust Ingestion Service**: High-frequency data fetching from Yahoo Finance API
 
-  - 10 symbols processing with 2-second intervals (30 requests/minute)
+  - 29 symbols processing with 2-second intervals (30 requests/minute)
   - AWS SQS FIFO publishing with message deduplication
   - Round-robin symbol processing with atomic counters
   - Graceful shutdown and error handling
@@ -300,18 +302,18 @@ Rust → Python message format compatibility VERIFIED!
   - IAM roles and permissions setup
 
 - **End-to-End Testing**: Production environment validation
+
   - Lambda function integration testing
   - ECS task execution verification
   - Cost monitoring and optimization validation
 
-### Planned Implementation
-
 - **Spring Boot Backend** (Java)
-
   - REST API endpoints
   - gRPC client for ML service integration
   - DynamoDB operations
   - AppSync integration
+
+### Planned Implementation
 
 - **Angular Frontend**
   - Real-time anomaly visualization dashboard
