@@ -31,14 +31,12 @@ try:
     from .model_loader import ModelLoader
     from .data_fetcher import DataFetcher
     from .feature_engineer import FeatureEngineer
-    from .sns_webhook import SNSWebhookHandler
 except ImportError:
     # Fallback for when running as script
     from inference.config import Config
     from inference.model_loader import ModelLoader
     from inference.data_fetcher import DataFetcher
     from inference.feature_engineer import FeatureEngineer
-    from inference.sns_webhook import SNSWebhookHandler
 
 # Configure logging
 logging.basicConfig(
@@ -499,23 +497,13 @@ def serve():
     surveillance_service = MarketSurveillanceService()
     pb2_grpc.add_MarketSurveillanceServiceServicer_to_server(surveillance_service, server)
     
-    # Choose data source: SNS webhook or SQS polling
-    if Config.USE_SNS_WEBHOOK:
-        # Use SNS webhook for push-based notifications (cost-effective)
-        webhook_handler = SNSWebhookHandler(
-            surveillance_service.model_loader, 
-            surveillance_service.feature_engineer
-        )
-        webhook_thread = webhook_handler.start_server(Config.WEBHOOK_HOST, Config.WEBHOOK_PORT)
-        logger.info(f"SNS webhook server started on {Config.WEBHOOK_HOST}:{Config.WEBHOOK_PORT}")
-        logger.info("Using push-based SNS notifications (cost optimized)")
-        
-    elif Config.USE_SQS_DATA_SOURCE:
-        # Use traditional SQS polling (legacy approach)
+    # Choose data source: SQS polling only
+    if Config.USE_SQS_DATA_SOURCE:
+        # Use SQS polling for data ingestion
         sqs_thread = threading.Thread(target=start_sqs_polling, args=(surveillance_service,), daemon=True)
         sqs_thread.start()
         logger.info("Background SQS polling thread started")
-        logger.info("Using SQS polling (higher cost)")
+        logger.info("Using SQS polling for data ingestion")
     else:
         logger.info("No data source enabled, using yfinance fallback only")
     

@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-This system demonstrates a complete real-time fraud detection pipeline for stock market data, utilizing a high-performance Rust ingestion service, AWS SQS for reliable message queuing, and a cost-optimized Lambda-based event-driven architecture for Python ML inference. The system processes live market data streams, applies ML-based fraud detection, and provides real-time anomaly detection capabilities with minimal operational costs.
+This system demonstrates a complete real-time fraud detection pipeline for stock market data, utilizing a high-performance Rust ingestion service, AWS SQS for reliable message queuing, and a Lambda-based event-driven architecture for Python ML inference. The system processes live market data streams with high-frequency collection (30 requests per minute), applies ML-based fraud detection with batch processing capabilities, and provides real-time anomaly detection.
 
 ## Architecture Flow
 
@@ -23,25 +23,25 @@ YAHOO[Yahoo Finance API<br/>Real-time Market Data]:::aws
 end
 
 %% INGESTION
-subgraph Ingestion["High-Performance Ingestion"]
-RUST[Rust Ingestion Service<br/>29 Symbols @ 60s intervals<br/>Rate-limited & Resilient]:::rust
+subgraph Ingestion["High-Frequency Ingestion"]
+RUST[Rust Ingestion Service<br/>10 Symbols @ 2s intervals<br/>30 requests/minute<br/>Round-robin Processing]:::rust
 end
 
 %% QUEUE LAYER
 subgraph Queue["Message Queue Layer"]
-SQS[AWS SQS FIFO<br/>market_queue.fifo<br/>Ordered & Deduplicated]:::aws
+SQS[AWS SQS FIFO<br/>market-surveillance-data.fifo<br/>Ordered & Deduplicated]:::aws
 end
 
 %% LAMBDA LAYER
-subgraph Lambda["Serverless Processing"]
-LAMBDA[Rust Lambda Function<br/>Event-driven ECS Task Trigger<br/>Cost-Optimized]:::lambda
+subgraph Lambda["Batch Processing Layer"]
+LAMBDA[Rust Lambda Function<br/>Batch SQS Processing<br/>Single ECS Task per Batch]:::lambda
 end
 
 %% PROCESSING
 subgraph Processing["ML Processing Layer"]
 direction TB
-PYTHON[Python Inference Service<br/>TensorFlow Lite Models<br/>Real-time Anomaly Detection<br/>gRPC API Server]:::python
-ECS[ECS Fargate Tasks<br/>Auto-scaling<br/>On-demand Execution]:::aws
+PYTHON[Python Inference Service<br/>TensorFlow Lite Models<br/>Batch Fraud Detection<br/>Multi-point Feature Engineering]:::python
+ECS[ECS Fargate Tasks<br/>Batch Processing<br/>On-demand Execution]:::aws
 end
 
 %% STORAGE
@@ -65,25 +65,25 @@ AF[AWS AppSync<br/>Real-time WebSocket Updates]:::aws
 
 %% FLOW CONNECTIONS
 %% High-frequency ingestion
-YAHOO -->|"High-freq API calls<br/>Rate-limited"| RUST
+YAHOO -->|"High-frequency API calls<br/>1,800 requests/hour<br/>Rate-limited"| RUST
 
 %% Rust to SQS
-RUST -->|"Structured JSON<br/>Market Data Messages"| SQS
+RUST -->|"Structured JSON<br/>Market Data Messages<br/>Symbol Round-robin"| SQS
 
 %% Cold Path - Historical Storage
 SQS -->|"Durable Storage & Replay"| S3
 
-%% SQS to Lambda (Event-driven)
-SQS -->|"SQS Event Trigger<br/>Batch Processing"| LAMBDA
+%% SQS to Lambda (Batch Event-driven)
+SQS -->|"SQS Batch Events<br/>Up to 10 messages<br/>FIFO Processing"| LAMBDA
 
-%% Lambda triggers ECS tasks
-LAMBDA -->|"ECS runTask API<br/>Environment Variables"| ECS
+%% Lambda triggers single ECS task for batch
+LAMBDA -->|"ECS runTask API<br/>BATCH_MARKET_DATA<br/>Environment Variables"| ECS
 
-%% ECS runs Python inference
-ECS -->|"Containerized Execution"| PYTHON
+%% ECS runs Python batch inference
+ECS -->|"Containerized Execution<br/>Multi-symbol Processing"| PYTHON
 
 %% ML to Backend
-PYTHON -->|"gRPC Streaming<br/>Anomaly Detection Results"| SB
+PYTHON -->|"gRPC Streaming<br/>Batch Anomaly Results"| SB
 
 %% Backend to DB
 SB -->|"Store Detections"| DD
@@ -99,13 +99,15 @@ AF -->|"WebSocket Events"| ANG
 
 ## System Components
 
-### Rust Ingestion Service (New)
+### Rust Ingestion Service
 
 - **Language**: Rust for maximum performance and memory safety
 - **Data Source**: Yahoo Finance API using `yahoo_finance_api` crate
-- **Symbols**: Processes 29 stock symbols (AAPL, GOOGL, MSFT, AMZN, TSLA, etc.)
-- **Frequency**: 60-second intervals with rate limiting using `governor` crate
+- **Symbols**: Processes 10 stock symbols (AAPL, GOOGL, MSFT, AMZN, TSLA, NVDA, META, NFLX, AMD, INTC)
+- **Frequency**: 2-second intervals with round-robin symbol processing (30 requests per minute)
+- **Rate Limiting**: 1,800 requests per hour (90% of Yahoo Finance API limit)
 - **Features**:
+  - Atomic counter for thread-safe symbol rotation
   - Graceful shutdown with CTRL+C handling
   - Robust error handling and retry logic
   - Environment-based configuration
@@ -115,44 +117,49 @@ AF -->|"WebSocket Events"| ANG
 ### Message Queue Layer
 
 - **AWS SQS FIFO**: Provides buffering, reliable delivery, and strict ordering
-- **Queue**: `market_queue.fifo` with message deduplication
+- **Queue**: `market-surveillance-data.fifo` with message deduplication
 - **Benefits**: Decouples high-frequency ingestion from ML processing
 - **Guarantees**: Message ordering and exactly-once delivery
+- **Batch Processing**: Supports up to 10 messages per Lambda invocation
 
-### Rust Lambda Function (Event-Driven Processing)
+### Rust Lambda Function (Batch Processing)
 
 - **Language**: Rust for maximum performance and minimal cold start latency
-- **Trigger**: SQS FIFO queue events (automatic scaling based on message volume)
+- **Trigger**: SQS FIFO queue events with batch processing (up to 10 messages per invocation)
 - **Function**: Event-driven ECS task orchestration via runTask API
+- **Batch Processing**: Collects multiple SQS messages and sends to single ECS task
 - **Architecture Benefits**:
   - **Zero Cost When Idle**: No continuous polling overhead
   - **Automatic Scaling**: Scales from 0 to 1000+ concurrent executions based on SQS backlog
   - **Pay-per-Execution**: Only pay when processing actual market data
-  - **Cost Reduction**: 60-80% cost savings vs. continuous polling architectures
+  - **Batch Efficiency**: Single ECS task processes multiple market data points
 - **Features**:
   - Batch processing up to 10 SQS messages per invocation
-  - Parallel ECS task launching with concurrency control
-  - Environment variable injection for Python inference containers
+  - Single ECS task execution per batch (reduces task overhead)
+  - Environment variable injection (`BATCH_MARKET_DATA`, `CORRELATION_ID`, `BATCH_SIZE`)
   - Comprehensive error handling and DLQ support
   - Sub-100ms cold start times
 - **AWS Integration**: Direct ECS runTask API calls to spawn Python inference containers
-- **Deployment**: Single ZIP file (`lambda-deployment.zip`) with Rust binary
+- **Deployment**: Single ZIP file (`market-lambda-processor.zip`) with Rust binary
 
 ### Python ML Inference Service
 
 - **Platform**: Python service with TensorFlow Lite models optimized for CPU inference
 - **Execution Modes**:
-  - **Lambda-triggered**: Event-driven single-shot processing via ECS Fargate tasks (primary mode)
+  - **Lambda-triggered**: Event-driven batch processing via ECS Fargate tasks (primary mode)
   - **gRPC Server**: Long-running service for Java Spring Boot integration (secondary mode)
+- **Batch Processing**: Handles multiple market data points for richer feature engineering
 - **Models**: Autoencoder + Classifier ensemble for anomaly detection (97% accuracy, 99% fraud recall)
 - **Message Compatibility**: Seamlessly processes Rust `SqsMarketMessage` format
 - **Features**:
   - Dual-mode operation with environment-driven configuration
-  - Real-time feature engineering and anomaly scoring
+  - Multi-point feature engineering with technical indicators (RSI, MACD, Bollinger Bands)
+  - Single-point fallback for simplified features when insufficient data
+  - Real-time anomaly scoring with symbol grouping
   - Graceful degradation and fallback data sources
-  - Container-optimized with fast startup times (~1-2 seconds)
+  - Container-optimized with fast startup times (1-2 seconds)
   - Compatible message format with Rust ingestion service
-- **Cost Optimization**: On-demand execution eliminates idle compute costs
+- **Processing**: On-demand execution with batch capabilities for enhanced analysis
 
 ### Backend Services
 
@@ -196,25 +203,33 @@ The fraud detection system uses an ensemble approach combining a supervised clas
 
 The ensemble model achieves excellent fraud detection (99% recall) while maintaining high overall accuracy, making it suitable for real-time market surveillance where missing fraud cases is more costly than false positives.
 
-## Cost Optimization & Architecture Benefits
+## Batch Processing Architecture
 
-### Event-Driven Architecture Advantages
+### High-Frequency Data Collection
 
-**Before (Traditional Polling):**
+The system implements high-frequency data collection with batch processing capabilities:
 
-- ❌ Continuous SQS polling = High compute costs
-- ❌ Idle resource utilization = Wasted spend
-- ❌ Fixed scaling = Poor resource optimization
-- ❌ 24/7 running containers = Expensive
+**Data Collection:**
 
-**After (Lambda-Based Event-Driven):**
+- Rust service processes 1 symbol every 2 seconds (round-robin)
+- 10 symbols total = full rotation every 20 seconds
+- 30 requests per minute = 1,800 requests per hour
+- Operates at 90% of Yahoo Finance API rate limit
 
-- ✅ Pay-per-execution model = 60-80% cost reduction
-- ✅ Zero cost when idle = No wasted compute
-- ✅ Automatic scaling (0 to 1000+ concurrent) = Perfect utilization
-- ✅ Sub-100ms cold starts = Excellent performance
+**Batch Processing:**
 
-### Message Format Compatibility
+- Lambda receives up to 10 SQS messages per invocation
+- Single ECS task processes entire batch
+- Enables multi-point feature engineering with technical indicators
+- Groups data by symbol for time-series analysis
+
+**Feature Engineering:**
+
+- **Single-point mode**: Simplified features when insufficient data
+- **Multi-point mode**: Full technical indicators (RSI, MACD, Bollinger Bands, moving averages)
+- Adaptive processing based on available data points per symbol
+
+## Message Format Compatibility
 
 The system ensures seamless communication between Rust and Python services:
 
@@ -228,75 +243,77 @@ The system ensures seamless communication between Rust and Python services:
 **Compatibility Test Results:**
 
 ```
-🧪 Testing Rust → Python message format compatibility
-✅ Message format validation passed!
-✅ Python successfully parsed Rust message!
-✅ All required fields present and correctly typed!
-🎉 Rust → Python message format compatibility VERIFIED!
+Testing Rust → Python message format compatibility
+Message format validation passed!
+Python successfully parsed Rust message!
+All required fields present and correctly typed!
+Rust → Python message format compatibility VERIFIED!
 ```
 
 ## Implementation Status
 
-### Completed ✅
+### Completed
 
-- [x] **Rust Ingestion Service**: High-performance data fetching from Yahoo Finance API
+- **Rust Ingestion Service**: High-frequency data fetching from Yahoo Finance API
 
-  - 29 symbols processing with rate limiting
+  - 10 symbols processing with 2-second intervals (30 requests/minute)
   - AWS SQS FIFO publishing with message deduplication
-  - SNS dependencies removed for simplified architecture
+  - Round-robin symbol processing with atomic counters
   - Graceful shutdown and error handling
   - Docker containerization ready
 
-- [x] **Rust Lambda Function**: Event-driven ECS task orchestration
+- **Rust Lambda Function**: Batch processing ECS task orchestration
 
   - Complete implementation with ECS runTask API integration
-  - SQS event processing with batch support
-  - Environment variable injection for Python containers
-  - Built and packaged for deployment (`lambda-deployment.zip`)
-  - Cost-optimized serverless architecture
+  - SQS batch event processing (up to 10 messages per invocation)
+  - Single ECS task execution per batch for efficiency
+  - Environment variable injection (`BATCH_MARKET_DATA`, `CORRELATION_ID`, `BATCH_SIZE`)
+  - Built and packaged for deployment (`market-lambda-processor.zip`)
 
-- [x] **Python ML Inference Service**: TensorFlow Lite fraud detection models
+- **Python ML Inference Service**: TensorFlow Lite fraud detection with batch processing
 
-  - Lambda-triggered execution mode (primary)
+  - Lambda-triggered batch execution mode (primary)
+  - Multi-point feature engineering with technical indicators
+  - Single-point fallback for simplified features
   - Message format compatibility with Rust ingestion service verified
-  - Environment variable configuration
+  - Environment variable configuration with adaptive processing
   - yfinance fallback for resilience
   - gRPC API server for low-latency communication
 
-- [x] **ML Model Training**: Fraud detection ensemble model (Autoencoder + Classifier)
+- **ML Model Training**: Fraud detection ensemble model (Autoencoder + Classifier)
 
   - 97% overall accuracy with 99% fraud recall
   - TensorFlow Lite optimization for CPU inference
 
-- [x] **Architecture Documentation**: Complete deployment guide
-  - Lambda-based event-driven architecture documented
-  - Cost optimization strategies and benefits outlined
+- **Architecture Documentation**: Complete deployment guide
+  - Batch processing architecture documented
+  - High-frequency data collection implementation
   - End-to-end deployment instructions
 
-### In Progress 🚧
+### In Progress
 
-- [ ] **AWS Infrastructure Deployment**: Complete cloud deployment
+- **AWS Infrastructure Deployment**: Complete cloud deployment
 
   - SQS FIFO queue configuration
   - Lambda function deployment and SQS trigger setup
   - ECS cluster and task definition configuration
   - IAM roles and permissions setup
 
-- [ ] **End-to-End Testing**: Production environment validation
+- **End-to-End Testing**: Production environment validation
   - Lambda function integration testing
   - ECS task execution verification
   - Cost monitoring and optimization validation
 
-### Planned Implementation 📋
+### Planned Implementation
 
-- [ ] **Spring Boot Backend** (Java)
+- **Spring Boot Backend** (Java)
 
   - REST API endpoints
   - gRPC client for ML service integration
   - DynamoDB operations
   - AppSync integration
 
-- [ ] **Angular Frontend**
+- **Angular Frontend**
   - Real-time anomaly visualization dashboard
   - Historical data reporting
   - WebSocket integration for live updates

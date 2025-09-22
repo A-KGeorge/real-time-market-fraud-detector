@@ -48,9 +48,6 @@ class Config:
     
     # SQS Consumer Configuration
     USE_SQS_DATA_SOURCE = os.getenv('USE_SQS_DATA_SOURCE', 'true').lower() == 'true'
-    USE_SNS_WEBHOOK = os.getenv('USE_SNS_WEBHOOK', 'false').lower() == 'true'  # Enable SNS webhook instead of polling
-    WEBHOOK_HOST = os.getenv('WEBHOOK_HOST', '0.0.0.0')
-    WEBHOOK_PORT = int(os.getenv('WEBHOOK_PORT', '8080'))
     AWS_REGION = os.getenv('AWS_REGION', 'us-east-1')
     SQS_QUEUE_NAME = os.getenv('SQS_QUEUE_NAME', 'market-surveillance-data.fifo')
     SQS_QUEUE_URL = os.getenv('SQS_QUEUE_URL')

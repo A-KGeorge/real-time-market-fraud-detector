@@ -6,13 +6,12 @@ use serde_json::Value;
 use std::env;
 use tokio::time::{timeout, Duration};
 use uuid::Uuid;
-use futures::future;
 
 mod ecs_client;
 mod sqs_handler;
 
 use ecs_client::EcsClient;
-use sqs_handler::{SqsMessage, SqsRecord};
+use sqs_handler::SqsMessage;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LambdaConfig {
@@ -120,56 +119,65 @@ async fn lambda_handler(
     // Initialize ECS client
     let ecs_client = EcsClient::new(&config.aws_region).await?;
 
-    // Process records with timeout and concurrency control
-    let processing_timeout = Duration::from_secs(config.max_timeout_seconds);
-    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(config.max_concurrent_tasks));
-
     let mut successful_count = 0;
     let mut failed_count = 0;
     let mut task_arns = Vec::new();
 
-    // Process records in batches with concurrency control
-    let mut handles = Vec::new();
-
+    // Collect all market data from SQS records
+    let mut batch_market_data = Vec::new();
+    
     for (index, record) in sqs_event.records.into_iter().enumerate() {
-        let client = ecs_client.clone();
-        let config = config.clone();
-        let permit = semaphore.clone().acquire_owned().await
-            .map_err(|e| Error::from(format!("Failed to acquire semaphore: {}", e)))?;
-        let record_correlation_id = format!("{}-{}", correlation_id, index);
-
-        let handle = tokio::spawn(async move {
-            let _permit = permit; // Keep permit alive
-            process_single_record(client, config, record, record_correlation_id).await
-        });
-
-        handles.push(handle);
-    }
-
-    // Wait for all processing to complete with timeout
-    let results = match timeout(processing_timeout, future::join_all(handles)).await {
-        Ok(results) => results,
-        Err(_) => {
-            error!("Processing timeout exceeded: {} seconds", config.max_timeout_seconds);
-            return Err(Error::from("Processing timeout exceeded"));
-        }
-    };
-
-    // Count results and collect task ARNs
-    for result in results {
-        match result {
-            Ok(Ok(task_arn)) => {
-                successful_count += 1;
-                task_arns.push(task_arn);
-            }
-            Ok(Err(e)) => {
-                error!("Record processing failed: {}", e);
-                failed_count += 1;
+        info!("Processing record {} with message ID: {}", index, record.message_id);
+        
+        // Parse the SQS message body
+        match serde_json::from_str::<serde_json::Value>(&record.body) {
+            Ok(market_data) => {
+                info!("Parsed market data for symbol: {}", 
+                      market_data.get("symbol").unwrap_or(&Value::String("unknown".to_string())));
+                batch_market_data.push(market_data);
             }
             Err(e) => {
-                error!("Task join error: {}", e);
+                error!("Failed to parse message body for record {}: {}", index, e);
                 failed_count += 1;
             }
+        }
+    }
+
+    if batch_market_data.is_empty() {
+        warn!("No valid market data found in SQS records");
+        return Ok(LambdaResponse {
+            processed_messages: total_records,
+            successful_tasks: 0,
+            failed_tasks: total_records,
+            task_arns: vec![],
+            correlation_id,
+            processing_time_ms: start_time.elapsed().as_millis() as u64,
+        });
+    }
+
+    info!("Processing batch of {} market data records", batch_market_data.len());
+
+    // Run single ECS task with batch data
+    let timeout_duration = Duration::from_secs(config.max_timeout_seconds);
+    let batch_processing_result = timeout(
+        timeout_duration, 
+        process_batch_records(ecs_client, config.clone(), batch_market_data, correlation_id.clone())
+    ).await;
+
+    match batch_processing_result {
+        Ok(Ok(task_arn)) => {
+            successful_count = 1; // One successful batch task
+            let task_arn_clone = task_arn.clone();
+            task_arns.push(task_arn);
+            info!("Successfully started batch ECS task: {}", task_arn_clone);
+        }
+        Ok(Err(e)) => {
+            error!("Batch processing failed: {}", e);
+            failed_count = 1;
+        }
+        Err(_) => {
+            error!("Batch processing timeout exceeded: {} seconds", config.max_timeout_seconds);
+            failed_count = 1;
         }
     }
 
@@ -190,36 +198,36 @@ async fn lambda_handler(
     })
 }
 
-async fn process_single_record(
+async fn process_batch_records(
     ecs_client: EcsClient,
     config: LambdaConfig,
-    record: SqsRecord,
+    batch_market_data: Vec<serde_json::Value>,
     correlation_id: String,
 ) -> Result<String> {
-    info!("Processing record with correlation_id: {}", correlation_id);
+    info!("Processing batch of {} records with correlation_id: {}", batch_market_data.len(), correlation_id);
 
-    // Parse the SQS message body
-    let market_data: serde_json::Value = serde_json::from_str(&record.body)
-        .map_err(|e| anyhow!("Failed to parse message body: {}", e))?;
+    // Convert batch data to JSON string for environment variable
+    let batch_data_json = serde_json::to_string(&batch_market_data)
+        .map_err(|e| anyhow!("Failed to serialize batch market data: {}", e))?;
 
-    info!("Parsed market data for symbol: {}", 
-          market_data.get("symbol").unwrap_or(&Value::String("unknown".to_string())));
+    info!("Batch data serialized, {} bytes", batch_data_json.len());
 
-    // Run ECS task with market data as environment override
-    match ecs_client.run_inference_task(&config, market_data, correlation_id.clone()).await {
+    // Run ECS task with batch market data as environment override
+    match ecs_client.run_batch_inference_task(&config, batch_market_data, correlation_id.clone()).await {
         Ok(task_arn) => {
             info!(
-                "Successfully started ECS task {} for correlation_id: {}",
+                "Successfully started batch ECS task {} for correlation_id: {}",
                 task_arn, correlation_id
             );
             Ok(task_arn)
         }
         Err(e) => {
             error!(
-                "Failed to start ECS task for correlation_id {}: {}",
+                "Failed to start batch ECS task for correlation_id {}: {}",
                 correlation_id, e
             );
             Err(e)
         }
     }
 }
+

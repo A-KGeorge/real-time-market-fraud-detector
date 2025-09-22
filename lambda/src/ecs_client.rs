@@ -1,15 +1,15 @@
+use crate::LambdaConfig;
 use anyhow::{anyhow, Result};
 use aws_config::BehaviorVersion;
 use aws_sdk_ecs::{
     types::{
-        AssignPublicIp, AwsVpcConfiguration, ContainerOverride, KeyValuePair, 
-        LaunchType, NetworkConfiguration, TaskOverride
+        AssignPublicIp, AwsVpcConfiguration, ContainerOverride, KeyValuePair, LaunchType,
+        NetworkConfiguration, TaskOverride,
     },
     Client,
 };
-use log::{info, error};
+use log::{error, info};
 use serde_json::Value;
-use crate::LambdaConfig;
 
 #[derive(Debug, Clone)]
 pub struct EcsClient {
@@ -61,13 +61,13 @@ impl EcsClient {
                 KeyValuePair::builder()
                     .name("TARGET_SYMBOL")
                     .value(symbol)
-                    .build()
+                    .build(),
             );
         }
 
         // Create container override
         let container_override = ContainerOverride::builder()
-            .name("python-inference-container") // Should match your task definition
+            .name("python-inference") // Should match your task definition
             .set_environment(Some(environment_overrides))
             .build();
 
@@ -115,7 +115,13 @@ impl EcsClient {
         if let Some(failures) = run_task_response.failures {
             let failure_reasons: Vec<String> = failures
                 .iter()
-                .map(|f| format!("{}:{}", f.arn().unwrap_or("unknown"), f.reason().unwrap_or("no reason")))
+                .map(|f| {
+                    format!(
+                        "{}:{}",
+                        f.arn().unwrap_or("unknown"),
+                        f.reason().unwrap_or("no reason")
+                    )
+                })
                 .collect();
             error!("ECS task failures: {:?}", failure_reasons);
             return Err(anyhow!("ECS task failed to start: {:?}", failure_reasons));
@@ -143,5 +149,102 @@ impl EcsClient {
         }
 
         Ok("UNKNOWN".to_string())
+    }
+
+    pub async fn run_batch_inference_task(
+        &self,
+        config: &LambdaConfig,
+        batch_market_data: Vec<Value>,
+        correlation_id: String,
+    ) -> Result<String> {
+        info!("Starting batch ECS task for correlation_id: {} with {} records", correlation_id, batch_market_data.len());
+
+        // Prepare environment variables for the container
+        let mut environment_overrides = vec![
+            KeyValuePair::builder()
+                .name("CORRELATION_ID")
+                .value(&correlation_id)
+                .build(),
+            KeyValuePair::builder()
+                .name("BATCH_MARKET_DATA")
+                .value(serde_json::to_string(&batch_market_data)?)
+                .build(),
+            KeyValuePair::builder()
+                .name("PROCESSING_MODE")
+                .value("LAMBDA_TRIGGERED")
+                .build(),
+        ];
+
+        // Add batch size info
+        environment_overrides.push(
+            KeyValuePair::builder()
+                .name("BATCH_SIZE")
+                .value(batch_market_data.len().to_string())
+                .build(),
+        );
+
+        // Create container override
+        let container_override = ContainerOverride::builder()
+            .name("python-inference") // Should match your task definition
+            .set_environment(Some(environment_overrides))
+            .build();
+
+        // Create task override
+        let task_override = TaskOverride::builder()
+            .container_overrides(container_override)
+            .build();
+
+        // Create network configuration for Fargate
+        let vpc_config = AwsVpcConfiguration::builder()
+            .set_subnets(Some(config.ecs_subnet_ids.clone()))
+            .set_security_groups(Some(config.ecs_security_group_ids.clone()))
+            .assign_public_ip(AssignPublicIp::Enabled) // Needed for Fargate with public subnets
+            .build()
+            .map_err(|e| anyhow::anyhow!("Failed to build VPC configuration: {}", e))?;
+
+        let network_config = NetworkConfiguration::builder()
+            .awsvpc_configuration(vpc_config)
+            .build();
+
+        // Run the task
+        let run_task_response = self
+            .client
+            .run_task()
+            .cluster(&config.ecs_cluster_name)
+            .task_definition(&config.ecs_task_definition)
+            .launch_type(LaunchType::Fargate)
+            .network_configuration(network_config)
+            .overrides(task_override)
+            .send()
+            .await
+            .map_err(|e| anyhow!("Failed to run batch ECS task: {}", e))?;
+
+        // Get the task ARN
+        if let Some(tasks) = run_task_response.tasks {
+            if let Some(task) = tasks.first() {
+                if let Some(task_arn) = &task.task_arn {
+                    info!("Successfully started batch ECS task: {}", task_arn);
+                    return Ok(task_arn.clone());
+                }
+            }
+        }
+
+        // Check for failures
+        if let Some(failures) = run_task_response.failures {
+            let failure_reasons: Vec<String> = failures
+                .iter()
+                .map(|f| {
+                    format!(
+                        "{}:{}",
+                        f.arn().unwrap_or("unknown"),
+                        f.reason().unwrap_or("no reason")
+                    )
+                })
+                .collect();
+            error!("Batch ECS task failures: {:?}", failure_reasons);
+            return Err(anyhow!("Batch ECS task failed to start: {:?}", failure_reasons));
+        }
+
+        Err(anyhow!("No task ARN returned from batch ECS runTask"))
     }
 }

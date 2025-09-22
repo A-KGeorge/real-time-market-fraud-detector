@@ -8,4 +8,6 @@ rust/target/
 rust/.env
 
 lambda/target/
-lambda/bootstrap
+lambda/zig-linux-x86_64-0.13.0.tar.xz
+lambda/zig-linux-x86_64-0.13.0
+lambda/market-lambda-processor.zip

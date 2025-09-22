@@ -18,7 +18,6 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from inference.model_loader import ModelLoader
 from inference.feature_engineer import FeatureEngineer
-from inference.grpc_server import MarketSurveillanceServicer
 from shared.config import Config
 
 def setup_logging():
@@ -45,17 +44,125 @@ def process_lambda_triggered_data() -> bool:
         logger.error("This script should only be run in LAMBDA_TRIGGERED mode")
         return False
     
-    # Get required environment variables
+    # Check if we have batch data or single data
+    batch_data_str = os.getenv('BATCH_MARKET_DATA')
+    single_data_str = os.getenv('MARKET_DATA')
+    
+    if batch_data_str:
+        logger.info("Processing batch market data")
+        return process_batch_market_data(batch_data_str)
+    elif single_data_str:
+        logger.info("Processing single market data point")
+        return process_single_market_data(single_data_str)
+    else:
+        logger.error("Neither BATCH_MARKET_DATA nor MARKET_DATA environment variable found")
+        return False
+
+def process_batch_market_data(batch_data_str: str) -> bool:
+    """
+    Process multiple market data points for richer feature engineering
+    """
+    logger = logging.getLogger(__name__)
+    
+    correlation_id = os.getenv('CORRELATION_ID', 'batch-unknown')
+    target_symbol = os.getenv('TARGET_SYMBOL')
+    
+    logger.info(f"Processing batch Lambda-triggered inference for correlation_id: {correlation_id}")
+    if target_symbol:
+        logger.info(f"Target symbol: {target_symbol}")
+    
+    try:
+        # Parse batch market data JSON (array of market data records)
+        batch_data = json.loads(batch_data_str)
+        logger.info(f"Successfully parsed batch data with {len(batch_data)} records")
+        
+        if not batch_data:
+            logger.error("Empty batch data")
+            return False
+        
+        # Group data by symbol
+        symbol_data = {}
+        for record in batch_data:
+            data_dict = record.get('data', record)
+            symbol = data_dict.get('symbol', 'UNKNOWN')
+            
+            if symbol not in symbol_data:
+                symbol_data[symbol] = []
+            symbol_data[symbol].append(data_dict)
+        
+        logger.info(f"Grouped data into {len(symbol_data)} symbols: {list(symbol_data.keys())}")
+        
+        # Initialize ML components once
+        logger.info("Initializing Market Surveillance Service...")
+        model_loader = ModelLoader()
+        
+        if not model_loader.load_models():
+            logger.error("Failed to load models")
+            return False
+        
+        feature_engineer = FeatureEngineer(model_loader.feature_columns)
+        logger.info("Market Surveillance Service initialized successfully")
+        
+        # Process each symbol with its accumulated data
+        results = {}
+        for symbol, data_points in symbol_data.items():
+            logger.info(f"Processing {len(data_points)} data points for symbol: {symbol}")
+            
+            # Convert to DataFrame with proper column names and sorting
+            import pandas as pd
+            market_df = pd.DataFrame([{
+                'Symbol': dp.get('symbol', symbol),
+                'Close': dp.get('close', 0),
+                'High': dp.get('high', 0),
+                'Low': dp.get('low', 0),
+                'Open': dp.get('open', 0),
+                'Volume': dp.get('volume', 0),
+                'Date': pd.to_datetime(dp.get('timestamp', pd.Timestamp.now())),
+                'previous_close': dp.get('previous_close', 0),
+            } for dp in data_points])
+            
+            # Sort by date to ensure proper time series order
+            market_df = market_df.sort_values('Date').reset_index(drop=True)
+            
+            logger.info(f"Created DataFrame with {len(market_df)} rows for {symbol}")
+            logger.info(f"Date range: {market_df['Date'].min()} to {market_df['Date'].max()}")
+            
+            # Process fraud detection with multiple data points
+            result = process_symbol_fraud_detection(
+                symbol, market_df, model_loader, feature_engineer
+            )
+            
+            results[symbol] = result
+        
+        # Log overall results
+        logger.info("=== BATCH PROCESSING RESULTS ===")
+        for symbol, result in results.items():
+            if result:
+                logger.info(f"{symbol}: Risk={result['risk_level']}, Score={result['ensemble_score']:.6f}")
+            else:
+                logger.error(f"{symbol}: Processing failed")
+        
+        logger.info(f"Successfully processed batch correlation_id: {correlation_id}")
+        return True
+        
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse batch market data JSON: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"Error during batch processing: {e}")
+        return False
+
+def process_single_market_data(market_data_str: str) -> bool:
+    """
+    Process single market data point (legacy mode)
+    """
+    logger = logging.getLogger(__name__)
+    
     correlation_id = os.getenv('CORRELATION_ID')
-    market_data_str = os.getenv('MARKET_DATA')
     target_symbol = os.getenv('TARGET_SYMBOL')
     
     if not correlation_id:
         logger.error("CORRELATION_ID environment variable is required")
-        return False
-    
-    if not market_data_str:
-        logger.error("MARKET_DATA environment variable is required")
         return False
     
     logger.info(f"Processing Lambda-triggered inference for correlation_id: {correlation_id}")
@@ -65,76 +172,156 @@ def process_lambda_triggered_data() -> bool:
     try:
         # Parse market data JSON
         market_data = json.loads(market_data_str)
-        logger.info(f"Parsed market data: {market_data}")
+        logger.info(f"Successfully parsed market data: {market_data}")
         
-        # Initialize components
-        logger.info("Loading ML models...")
+        # Initialize components for Lambda mode (no SQS/external connections)
+        logger.info("Initializing Market Surveillance Service...")
         model_loader = ModelLoader()
-        feature_engineer = FeatureEngineer()
         
-        # Create a temporary servicer instance for processing
-        servicer = MarketSurveillanceServicer(
-            model_loader=model_loader,
-            feature_engineer=feature_engineer
-        )
+        # Load models first
+        if not model_loader.load_models():
+            logger.error("Failed to load models")
+            return False
+        
+        # Initialize feature engineer with loaded feature columns
+        feature_engineer = FeatureEngineer(model_loader.feature_columns)
+        
+        logger.info("Market Surveillance Service initialized successfully")
         
         # Extract symbol from market data
         symbol = market_data.get('data', {}).get('symbol') or market_data.get('symbol', 'UNKNOWN')
         
         logger.info(f"Processing fraud detection for symbol: {symbol}")
         
-        # Perform fraud detection
-        result = servicer.perform_fraud_detection(symbol, market_data)
+        # Convert market data to DataFrame for feature engineering
+        # Assuming market_data has structure: {"data": {"symbol": "AAPL", "close": 245.5, ...}}
+        data_dict = market_data.get('data', market_data)
         
-        # Log results
-        logger.info(f"Fraud detection completed for {symbol}")
-        logger.info(f"Ensemble Score: {result.ensemble_score}")
-        logger.info(f"Classifier Probability: {result.classifier_probability}")
-        logger.info(f"Anomaly Score: {result.anomaly_score}")
-        logger.info(f"Is Suspicious: {result.is_suspicious}")
-        logger.info(f"Risk Level: {result.risk_level}")
+        # Create a simple DataFrame with the market data point
+        import pandas as pd
+        market_df = pd.DataFrame([{
+            'Symbol': data_dict.get('symbol', symbol),
+            'Close': data_dict.get('close', 0),
+            'High': data_dict.get('high', 0),
+            'Low': data_dict.get('low', 0),
+            'Open': data_dict.get('open', 0),
+            'Volume': data_dict.get('volume', 0),
+            'Date': pd.to_datetime(data_dict.get('timestamp', pd.Timestamp.now())),
+            'previous_close': data_dict.get('previous_close', 0),
+        }])
         
-        if result.alerts:
-            logger.warning(f"Alerts generated: {list(result.alerts)}")
+        logger.info(f"Created DataFrame with {len(market_df)} row(s)")
         
-        # TODO: Here you could send results to:
-        # 1. DynamoDB for storage
-        # 2. SNS for notifications
-        # 3. CloudWatch metrics
-        # 4. Another SQS queue for downstream processing
+        result = process_symbol_fraud_detection(symbol, market_df, model_loader, feature_engineer)
         
-        # For now, just log the successful completion
-        logger.info(f"Successfully processed correlation_id: {correlation_id}")
-        
-        return True
+        if result:
+            logger.info(f"Successfully processed correlation_id: {correlation_id}")
+            return True
+        else:
+            logger.error("Fraud detection processing failed")
+            return False
         
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse market data JSON: {e}")
         return False
     except Exception as e:
         logger.error(f"Error during processing: {e}")
-        logger.exception("Full traceback:")
         return False
 
-def main():
-    """Main entry point for Lambda-triggered processing"""
-    setup_logging()
+def process_symbol_fraud_detection(symbol: str, market_df, model_loader, feature_engineer) -> dict:
+    """
+    Common fraud detection logic for both single and batch processing
+    """
     logger = logging.getLogger(__name__)
     
-    logger.info("Starting Lambda-triggered inference service")
-    
     try:
-        success = process_lambda_triggered_data()
-        if success:
-            logger.info("Processing completed successfully")
-            sys.exit(0)
+        # Engineer features for inference
+        features = feature_engineer.engineer_features_for_inference(market_df, symbol)
+        if features is None:
+            logger.error(f"Feature engineering failed for {symbol}")
+            return None
+            
+        # Extract market data for response (if it exists)
+        market_data_proto = features.pop('_market_data', {})
+        
+        # Convert features to numpy array and scale
+        feature_vector = feature_engineer.get_feature_vector(features)
+        scaled_features = model_loader.scale_features(feature_vector)
+        
+        # Run inference
+        ensemble_scores, anomaly_scores, classifier_probs = model_loader.ensemble_predict(scaled_features)
+        
+        ensemble_score = float(ensemble_scores[0])
+        anomaly_score = int(anomaly_scores[0])
+        classifier_prob = float(classifier_probs[0])
+        
+        # Determine risk level
+        if ensemble_score > 0.7:
+            risk_level = "HIGH"
+        elif ensemble_score > 0.3:
+            risk_level = "MEDIUM"
         else:
-            logger.error("Processing failed")
-            sys.exit(1)
-    except Exception as e:
-        logger.error(f"Fatal error: {e}")
-        logger.exception("Full traceback:")
-        sys.exit(1)
+            risk_level = "LOW"
+        
+        # Generate alerts
+        alerts = feature_engineer.generate_alerts(
+            features, ensemble_score, classifier_prob, anomaly_score
+        )
+        
+        # Log results
+        logger.info(f"Fraud detection completed for {symbol}")
+        logger.info(f"Ensemble Score: {ensemble_score}")
+        logger.info(f"Classifier Probability: {classifier_prob}")
+        logger.info(f"Anomaly Score: {anomaly_score}")
+        logger.info(f"Is Suspicious: {ensemble_score > 0.5}")
+        logger.info(f"Risk Level: {risk_level}")
+        
+        if alerts:
+            logger.warning(f"Alerts generated: {list(alerts)}")
+        
+        return {
+            'symbol': symbol,
+            'ensemble_score': ensemble_score,
+            'classifier_probability': classifier_prob,
+            'anomaly_score': anomaly_score,
+            'is_suspicious': ensemble_score > 0.5,
+            'risk_level': risk_level,
+            'alerts': alerts,
+            'market_data': market_data_proto
+        }
+            
+    except Exception as feature_error:
+        logger.error(f"Error during feature engineering/inference for {symbol}: {feature_error}")
+        # Create basic error response
+        return {
+            'symbol': symbol,
+            'ensemble_score': 0.0,
+            'classifier_probability': 0.0,
+            'anomaly_score': 0,
+            'is_suspicious': False,
+            'risk_level': "ERROR",
+            'alerts': [f"Error: {str(feature_error)}"],
+            'market_data': {}
+        }
 
 if __name__ == "__main__":
-    main()
+    # Setup logging first
+    setup_logging()
+    
+    logger = logging.getLogger(__name__)
+    
+    try:
+        logger.info("Starting Lambda-triggered inference service")
+        
+        # Process the Lambda-triggered data
+        success = process_lambda_triggered_data()
+        
+        if not success:
+            logger.error("Processing failed")
+            sys.exit(1)
+        
+        logger.info("Processing completed successfully")
+        
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}")
+        sys.exit(1)

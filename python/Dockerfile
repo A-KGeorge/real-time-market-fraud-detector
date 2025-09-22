@@ -1,5 +1,5 @@
 # Multi-stage build for Python ML Service
-FROM python:3.11-slim as builder
+FROM python:3.11-slim AS builder
 
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -51,7 +51,6 @@ COPY src/generated/ ./src/generated/
 COPY src/main.py ./src/
 COPY src/lambda_inference.py ./src/
 COPY entrypoint.sh ./
-COPY requirements.txt ./
 
 # Copy only TensorFlow Lite models and associated files
 COPY models/*.tflite ./models/

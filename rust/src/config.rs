@@ -21,9 +21,10 @@ impl Config {
         let sqs_queue_url = env::var("SQS_QUEUE_URL")
             .map_err(|_| anyhow!("SQS_QUEUE_URL environment variable is required"))?;
 
-        // Default to the same 10 symbols used in the Python service, plus 19 more for 29 total
+        // Default to a smaller, high-value set for frequent updates
+        // You can still override with MARKET_DATA_SYMBOLS env var for full list
         let symbols_str = env::var("MARKET_DATA_SYMBOLS")
-            .unwrap_or_else(|_| "AAPL,GOOGL,MSFT,AMZN,TSLA,NVDA,META,NFLX,AMD,INTC,BABA,JPM,JNJ,V,PG,UNH,HD,MA,PYPL,DIS,VZ,ADBE,CRM,CMCSA,PFE,KO,PEP,ABT,TMO".to_string());
+            .unwrap_or_else(|_| "AAPL,GOOGL,MSFT,AMZN,TSLA,NVDA,META,NFLX,AMD,INTC".to_string());
 
         let symbols: Vec<String> = symbols_str
             .split(',')
@@ -34,8 +35,21 @@ impl Config {
             return Err(anyhow!("No symbols configured"));
         }
 
+        // Add configuration for max requests per cycle to stay within limits
+        let max_symbols_per_cycle = env::var("MAX_SYMBOLS_PER_CYCLE")
+            .unwrap_or_else(|_| symbols.len().to_string())
+            .parse::<usize>()
+            .map_err(|_| anyhow!("Invalid MAX_SYMBOLS_PER_CYCLE"))?;
+
+        // Limit symbols if configured
+        let limited_symbols = if max_symbols_per_cycle < symbols.len() {
+            symbols.into_iter().take(max_symbols_per_cycle).collect()
+        } else {
+            symbols
+        };
+
         let ingestion_interval_seconds = env::var("INGESTION_INTERVAL_SECONDS")
-            .unwrap_or_else(|_| "60".to_string())
+            .unwrap_or_else(|_| "2".to_string()) // Default to 2 seconds for 30 requests/minute
             .parse::<u64>()
             .map_err(|_| anyhow!("Invalid INGESTION_INTERVAL_SECONDS"))?;
 
@@ -50,7 +64,7 @@ impl Config {
         Ok(Config {
             aws_region,
             sqs_queue_url,
-            symbols,
+            symbols: limited_symbols,
             ingestion_interval_seconds,
             yahoo_finance_base_url,
             test_mode,

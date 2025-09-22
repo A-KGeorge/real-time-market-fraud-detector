@@ -29,9 +29,14 @@ class FeatureEngineer:
             Dictionary with engineered features or None if failed
         """
         try:
-            if data.empty or len(data) < 2:
-                logger.warning(f"Insufficient data for feature engineering: {len(data)} rows")
+            if data.empty:
+                logger.warning(f"No data provided for feature engineering")
                 return None
+            
+            # Handle single data point scenario (Lambda mode)
+            if len(data) == 1:
+                logger.info(f"Single data point mode - using simplified feature engineering")
+                return self._engineer_single_point_features(data, symbol)
             
             # Make a copy and sort by date
             df = data.copy().sort_values('Date').reset_index(drop=True)
@@ -265,3 +270,111 @@ class FeatureEngineer:
             alerts.append("Alert generation error - manual review recommended")
         
         return alerts
+    
+    def _engineer_single_point_features(self, data: pd.DataFrame, symbol: str) -> Dict:
+        """
+        Engineer features for a single data point (Lambda mode)
+        Uses simplified calculations that don't require historical data
+        """
+        try:
+            row = data.iloc[0]
+            
+            # Map column names from lambda data format to expected format
+            # Lambda data comes with uppercase: Symbol, Close, High, Low, Open, Volume, Date, previous_close
+            open_price = row.get('Open', row.get('open', 0))
+            high_price = row.get('High', row.get('high', 0)) 
+            low_price = row.get('Low', row.get('low', 0))
+            close_price = row.get('Close', row.get('close', 0))
+            volume = row.get('Volume', row.get('volume', 0))
+            previous_close = row.get('previous_close', close_price)
+            
+            # Calculate simplified features that don't need historical data
+            features = {}
+            
+            # Initialize all expected features with default values
+            for col in self.feature_columns:
+                features[col] = 0.0
+            
+            # Calculate basic features that can be derived from single point
+            if previous_close > 0:
+                features['Price_Change'] = (close_price - previous_close) / previous_close
+                features['Gap'] = (open_price - previous_close) / previous_close
+            else:
+                features['Price_Change'] = 0.0
+                features['Gap'] = 0.0
+            
+            if close_price > 0:
+                features['Price_Range'] = (high_price - low_price) / close_price
+                features['Volume_Price_Ratio'] = volume / close_price
+            else:
+                features['Price_Range'] = 0.0
+                features['Volume_Price_Ratio'] = 0.0
+            
+            # Set default values for technical indicators that need history
+            features['RSI'] = 50.0  # Neutral RSI
+            features['MACD'] = 0.0
+            features['MACD_Signal'] = 0.0
+            features['MACD_Histogram'] = 0.0
+            
+            # Bollinger Bands approximation
+            bb_width = close_price * 0.04  # Approximate 4% width
+            features['BB_Width'] = bb_width
+            features['BB_Position'] = 0.5  # Middle position
+            
+            # Price vs moving averages (use current price as approximation)
+            features['Price_vs_SMA10'] = 0.0  # No change from MA
+            features['Price_vs_SMA20'] = 0.0  # No change from MA
+            
+            # Volatility approximation from price range
+            price_volatility = abs(features['Price_Range']) if features['Price_Range'] else 0.01
+            features['Volatility_10d'] = price_volatility
+            features['Volatility_20d'] = price_volatility
+            
+            # Time-based features
+            try:
+                from datetime import datetime
+                timestamp = row.get('timestamp', '')
+                if timestamp:
+                    dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                    features['Hour'] = dt.hour
+                    features['DayOfWeek'] = dt.weekday()
+                    features['IsMonday'] = 1.0 if dt.weekday() == 0 else 0.0
+                    features['IsFriday'] = 1.0 if dt.weekday() == 4 else 0.0
+                else:
+                    # Default to current time if timestamp not available
+                    now = datetime.now()
+                    features['Hour'] = now.hour
+                    features['DayOfWeek'] = now.weekday()
+                    features['IsMonday'] = 1.0 if now.weekday() == 0 else 0.0
+                    features['IsFriday'] = 1.0 if now.weekday() == 4 else 0.0
+            except Exception:
+                # Fallback to defaults
+                features['Hour'] = 12.0  # Noon
+                features['DayOfWeek'] = 2.0  # Wednesday
+                features['IsMonday'] = 0.0
+                features['IsFriday'] = 0.0
+            
+            # Volume features
+            features['Volume_Change'] = 0.0  # No historical volume to compare
+            features['Volume_Ratio'] = 1.0  # Assume normal volume
+            
+            # Add market data for response
+            features['_market_data'] = {
+                'open': float(open_price),
+                'high': float(high_price),
+                'low': float(low_price), 
+                'close': float(close_price),
+                'volume': int(volume),
+                'price_change': float(features['Price_Change']),
+                'volume_ratio': float(features['Volume_Ratio']),
+                'rsi': float(features['RSI']),
+                'macd': float(features['MACD']),
+                'bb_position': float(features['BB_Position'])
+            }
+            
+            logger.info(f"Generated {len(features)-1} features for single data point")
+            return features
+            
+        except Exception as e:
+            logger.error(f"Single point feature engineering failed: {str(e)}")
+            return None

@@ -1,5 +1,7 @@
 use anyhow::Result;
 use log::{error, info, warn};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::signal;
 use tokio::time;
@@ -30,6 +32,9 @@ async fn main() -> Result<()> {
 
     info!("Clients initialized successfully");
 
+    // Create atomic counter for round-robin symbol selection
+    let symbol_index = Arc::new(AtomicUsize::new(0));
+
     // Set up graceful shutdown
     let shutdown_signal = async {
         signal::ctrl_c()
@@ -43,7 +48,7 @@ async fn main() -> Result<()> {
         loop {
             let start_time = std::time::Instant::now();
 
-            match run_ingestion_cycle(&config, &yahoo_client, &sqs_client).await {
+            match run_ingestion_cycle(&config, &yahoo_client, &sqs_client, &symbol_index).await {
                 Ok(processed) => {
                     let duration = start_time.elapsed();
                     info!(
@@ -81,26 +86,37 @@ async fn run_ingestion_cycle(
     config: &Config,
     yahoo_client: &YahooFinanceClient,
     sqs_client: &SqsClient,
+    symbol_index: &Arc<AtomicUsize>,
 ) -> Result<usize> {
-    let mut processed_count = 0;
+    // For frequent updates, process one symbol per cycle to distribute load evenly
+    // This ensures all symbols get updated over time while maintaining high frequency
+    let current_index = symbol_index.fetch_add(1, Ordering::SeqCst) % config.symbols.len();
+    let symbol_to_process = &config.symbols[current_index];
 
-    for symbol in &config.symbols {
-        match process_symbol(symbol, yahoo_client, sqs_client, config.test_mode).await {
-            Ok(_) => {
-                processed_count += 1;
-                info!("Successfully processed symbol: {}", symbol);
-            }
-            Err(e) => {
-                warn!("Failed to process symbol {}: {}", symbol, e);
-                // Continue with other symbols even if one fails
-            }
+    info!(
+        "Processing symbol {} of {}: {}",
+        current_index + 1,
+        config.symbols.len(),
+        symbol_to_process
+    );
+
+    match process_symbol(
+        symbol_to_process,
+        yahoo_client,
+        sqs_client,
+        config.test_mode,
+    )
+    .await
+    {
+        Ok(_) => {
+            info!("Successfully processed symbol: {}", symbol_to_process);
+            Ok(1)
         }
-
-        // Small delay between symbol requests to be respectful to Yahoo Finance
-        time::sleep(Duration::from_millis(100)).await;
+        Err(e) => {
+            warn!("Failed to process symbol {}: {}", symbol_to_process, e);
+            Ok(0) // Don't fail the entire cycle for one symbol
+        }
     }
-
-    Ok(processed_count)
 }
 
 async fn process_symbol(
